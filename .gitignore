@@ -9,3 +9,8 @@ ehthumbs.db
 Thumbs.db
 *.pyc
 *.sh
+*.zip
+*.json
+*.h5
+baseline_data/
+.qodo
