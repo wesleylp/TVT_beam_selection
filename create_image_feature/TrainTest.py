@@ -1,23 +1,26 @@
 import os
 import numpy as np
+from PIL import Image
 
-import keras
-from keras.models import Sequential, model_from_json
-from keras.layers import (
+from tensorflow.keras.models import Sequential, model_from_json
+from tensorflow.keras.layers import (
     Conv2D,
     MaxPooling2D,
     Dropout,
     Flatten,
     Dense,
     Activation,
+    RandomBrightness,
+    Rescaling,
 )
-from keras.optimizers import Adam
-from keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.losses import categorical_crossentropy
+from tensorflow.keras.optimizers import Adam
 
-from PIL import Image
+# ImageDataGenerator is deprecated
+# from keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.utils import image_dataset_from_directory
 
-
-from create_crops_of_Entire_Image import *
+from create_crops_of_Entire_Image import create_crops_of_entire_Image
 
 
 def show_all_files_in_directory(input_path):
@@ -131,17 +134,36 @@ class TrainTest:
         epochs=10,
         model_path="/home/batool/Directroy/Wall/model/",
     ):
+        # # ImageDataGenerator is deprecated
         # Train
         # Create an Image Datagenerator model, and normalize
-        traingen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
-        train_generator = traingen.flow_from_directory(
+        # traingen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
+        # train_generator = traingen.flow_from_directory(
+        #     data_path + "/train/",
+        #     target_size=(window, window),
+        #     color_mode="rgb",
+        #     batch_size=batch_size,
+        #     class_mode="categorical",
+        #     shuffle=True,
+        # )
+
+        ###########
+        train_dataset = image_dataset_from_directory(
             data_path + "/train/",
-            target_size=(window, window),
-            color_mode="rgb",
+            image_size=(window, window),
+            labels="inferred",
             batch_size=batch_size,
-            class_mode="categorical",
+            label_mode="categorical",
             shuffle=True,
         )
+        preprocessing = Sequential(
+            [
+                Rescaling(1.0 / 255),
+                RandomBrightness(factor=0.5),  # same as brightness_range=[0.5, 1.5]
+            ]
+        )
+        train_generator = train_dataset.map(lambda x, y: (preprocessing(x), y))
+        ###########
 
         batchX, batchy = train_generator.next()
         print(
@@ -151,22 +173,41 @@ class TrainTest:
 
         STEP_SIZE_TRAIN = train_generator.n // train_generator.batch_size
 
+        # # ImageDataGenerator is deprecated
         # Validation
         # Create an Image Datagenerator model, and normalize
-        valgen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
-        validation_generator = valgen.flow_from_directory(
+        # valgen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
+        # validation_generator = valgen.flow_from_directory(
+        #     data_path + "/validation/",
+        #     target_size=(window, window),
+        #     color_mode="rgb",
+        #     batch_size=batch_size,
+        #     class_mode="categorical",
+        #     shuffle=True,
+        # )
+
+        ###########
+        val_dataset = image_dataset_from_directory(
             data_path + "/validation/",
-            target_size=(window, window),
-            color_mode="rgb",
+            image_size=(window, window),
+            labels="inferred",
             batch_size=batch_size,
-            class_mode="categorical",
+            label_mode="categorical",
             shuffle=True,
         )
+        preprocessing = Sequential(
+            [
+                Rescaling(1.0 / 255),
+                RandomBrightness(factor=0.5),  # same as brightness_range=[0.5, 1.5]
+            ]
+        )
+        validation_generator = val_dataset.map(lambda x, y: (preprocessing(x), y))
+        ###########
 
         STEP_SIZE_Validation = validation_generator.n // validation_generator.batch_size
 
         self.model.compile(
-            loss=keras.losses.categorical_crossentropy,
+            loss=categorical_crossentropy,
             optimizer=Adam(lr=lr),
             metrics=["accuracy"],
         )
@@ -191,20 +232,40 @@ class TrainTest:
         model_path="/home/batool/Directroy/Wall/model/",
     ):
 
-        testgen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
-        test_generator = testgen.flow_from_directory(
+        # # ImageDataGenerator is deprecated
+        # testgen = ImageDataGenerator(rescale=1.0 / 255, brightness_range=[0.5, 1.5])
+        # test_generator = testgen.flow_from_directory(
+        #     data_path + "/test/",
+        #     target_size=(window, window),
+        #     color_mode="rgb",
+        #     batch_size=batch_size,
+        #     class_mode="categorical",
+        #     shuffle=True,
+        # )
+
+        ###########
+        test_dataset = image_dataset_from_directory(
             data_path + "/test/",
-            target_size=(window, window),
-            color_mode="rgb",
+            image_size=(window, window),
+            labels="inferred",
             batch_size=batch_size,
-            class_mode="categorical",
+            label_mode="categorical",
             shuffle=True,
         )
+        # it's weird apllying data augmentation on test data
+        preprocessing = Sequential(
+            [
+                Rescaling(1.0 / 255),
+                RandomBrightness(factor=0.5),  # same as brightness_range=[0.5, 1.5]
+            ]
+        )
+        test_generator = test_dataset.map(lambda x, y: (preprocessing(x), y))
+        ###########
 
         STEP_SIZE_TEST = test_generator.n // test_generator.batch_size
 
         self.model.compile(
-            loss=keras.losses.categorical_crossentropy,
+            loss=categorical_crossentropy,
             optimizer=Adam(lr=lr),
             metrics=["accuracy"],
         )
@@ -232,14 +293,32 @@ class TrainTest:
             )
             print("**********Create crops is done**************")
 
-            predgen = ImageDataGenerator(rescale=1.0 / 255)
-            preds_generator = predgen.flow_from_directory(
+            # # ImageDataGenerator is deprecated
+            # predgen = ImageDataGenerator(rescale=1.0 / 255)
+            # preds_generator = predgen.flow_from_directory(
+            #     SWAP,
+            #     target_size=(window, window),
+            #     color_mode="rgb",
+            #     batch_size=1,
+            #     shuffle=False,
+            # )
+            ###########
+            pred_dataset = image_dataset_from_directory(
                 SWAP,
-                target_size=(window, window),
-                color_mode="rgb",
+                image_size=(window, window),
+                labels="inferred",
                 batch_size=1,
+                # label_mode="categorical",
                 shuffle=False,
             )
+            preprocessing = Sequential(
+                [
+                    Rescaling(1.0 / 255),
+                ]
+            )
+            preds_generator = pred_dataset.map(lambda x, y: (preprocessing(x), y))
+            ###########
+
             STEP_SIZE_PRED = preds_generator.n // preds_generator.batch_size
             preds_generator.reset()
             pred = self.model.predict_generator(

@@ -9,6 +9,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 import random
+from pathlib import Path
 
 import tensorflow as tf
 
@@ -26,8 +27,9 @@ from tensorflow.keras.layers import (
 )
 from tensorflow.keras.losses import categorical_crossentropy
 from tensorflow.keras.optimizers import Adam
-from tensorflow.python.keras.layers.normalization import BatchNormalization
 
+# from tensorflow.python.keras.layers.normalization import BatchNormalization
+from tensorflow.keras.layers import BatchNormalization
 
 from sklearn.preprocessing import normalize
 
@@ -36,7 +38,8 @@ from custom_metrics import *
 from math import log
 
 
-tf.compat.v1.disable_eager_execution()  # TF2
+# tf.compat.v1.disable_eager_execution()  # TF2
+tf.compat.v1.enable_eager_execution()
 
 ############################
 # Fix the seed
@@ -94,7 +97,6 @@ def getBeamOutput(output_file):
 
     yMatrix = np.abs(yMatrix)
     yMatrix /= np.max(yMatrix)
-    yMatrixShape = yMatrix.shape
     num_classes = yMatrix.shape[1] * yMatrix.shape[2]
 
     y = yMatrix.reshape(yMatrix.shape[0], num_classes)
@@ -112,7 +114,6 @@ def custom_label(output_file, strategy="one_hot"):
 
     yMatrix = np.abs(yMatrix)
 
-    yMatrixShape = yMatrix.shape
     num_classes = yMatrix.shape[1] * yMatrix.shape[2]
     y = yMatrix.reshape(yMatrix.shape[0], num_classes)
     y_non_on_hot = np.array(y)
@@ -167,11 +168,18 @@ def througput_ratio(preds, y):
     return throughputs
 
 
+this_file_path = Path(os.path.dirname(os.path.realpath(__file__)))
+
 parser = argparse.ArgumentParser(
     description="Configure the files before training the net."
 )
 parser.add_argument("--id_gpu", default=1, type=int, help="which gpu to use.")
-parser.add_argument("--data_folder", help="Location of the data directory", type=str)
+parser.add_argument(
+    "--data_folder",
+    default=str(this_file_path / ".." / "baseline_data"),
+    help="Location of the data directory",
+    type=str,
+)
 parser.add_argument(
     "--input",
     nargs="*",
@@ -180,7 +188,10 @@ parser.add_argument(
     help="Which data to use as input. Select from: img, lidar or coord.",
 )
 parser.add_argument(
-    "--test_data_folder", help="Location of the test data directory", type=str
+    "--test_data_folder",
+    default=str(this_file_path / ".." / "baseline_data"),
+    help="Location of the test data directory",
+    type=str,
 )
 parser.add_argument(
     "--restore_models",
@@ -189,7 +200,7 @@ parser.add_argument(
     default=False,
 )
 parser.add_argument(
-    "--epochs", default=10, type=int, help="Specify the epochs to train"
+    "--epochs", default=50, type=int, help="Specify the epochs to train"
 )
 parser.add_argument(
     "--lr",
@@ -213,7 +224,7 @@ parser.add_argument(
     "--model_folder",
     help="Location of the trained models folder",
     type=str,
-    default="/home/batool/beam_selection_NU/baseline_code/model_folder/",
+    default=str(this_file_path / "model_folder"),
 )
 parser.add_argument(
     "--image_feature_to_use",
@@ -225,7 +236,7 @@ parser.add_argument(
 parser.add_argument(
     "--train_or_test",
     type=str,
-    default="test",
+    default="train",
     help="Train or test",
     choices=["train", "test"],
 )
@@ -239,17 +250,24 @@ if args.id_gpu >= 0:
     # The GPU id to use
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.id_gpu)
 
-check_and_create(args.model_folder)
+# check_and_create(args.model_folder)
+os.makedirs(args.model_folder, exist_ok=True)
+
 ###############################################################################
 # Outputs (Beams)
 ###############################################################################
-output_train_file = args.data_folder + "beam_output/beams_output_train.npz"
-output_validation_file = args.data_folder + "beam_output/beams_output_validation.npz"
-output_test_file = args.test_data_folder + "beam_output/beams_output_test.npz"
+beams_output_folder = Path(args.data_folder) / "beam_output"
+
+
+output_train_file = str(beams_output_folder / "beams_output_train.npz")
+output_validation_file = str(beams_output_folder / "beams_output_validation.npz")
+output_test_file = str(beams_output_folder / "beams_output_test.npz")
+
 if args.strategy == "default":
     y_train, num_classes = getBeamOutput(output_train_file)
     y_validation, _ = getBeamOutput(output_validation_file)
     y_test, _ = getBeamOutput(output_test_file)
+
 elif args.strategy == "one_hot" or args.strategy == "reg":
     y_train_not_onehot, y_train, num_classes = custom_label(
         output_train_file, args.strategy
@@ -261,6 +279,7 @@ elif args.strategy == "one_hot" or args.strategy == "reg":
 
 else:
     print("invalid labeling strategy")
+
 ###############################################################################
 # Inputs (GPS, Image, LiDAR)
 ###############################################################################
@@ -268,23 +287,25 @@ Initial_labels_train = y_train  # these are same for all modalities
 Initial_labels_val = y_validation
 
 if "coord" in args.input:
+    coord_folder = Path(args.data_folder) / "coord_input"
+
     # train
-    X_coord_train = open_npz(
-        args.data_folder + "coord_input/coord_train.npz", "coordinates"
-    )
+    X_coord_train = open_npz(str(coord_folder / "coord_train.npz"), "coordinates")
+
     # validation
     X_coord_validation = open_npz(
-        args.data_folder + "coord_input/coord_validation.npz", "coordinates"
+        str(coord_folder / "coord_validation.npz"), "coordinates"
     )
+
     # test
-    X_coord_test = open_npz(
-        args.test_data_folder + "coord_input/coord_test.npz", "coordinates"
-    )
+    X_coord_test = open_npz(str(coord_folder / "coord_test.npz"), "coordinates")
     coord_train_input_shape = X_coord_train.shape
+
     ###############Normalize
     X_coord_train = normalize(X_coord_train, axis=1, norm="l1")
     X_coord_validation = normalize(X_coord_validation, axis=1, norm="l1")
     X_coord_test = normalize(X_coord_test, axis=1, norm="l1")
+
     ## Reshape for convolutional input
     X_coord_train = X_coord_train.reshape(
         (X_coord_train.shape[0], X_coord_train.shape[1], 1)
@@ -298,12 +319,16 @@ if "coord" in args.input:
 
 if "img" in args.input:
     resizeFac = 20  # Resize Factor
+
     if args.image_feature_to_use == "v1":
         folder = "image_input"
+
     elif args.image_feature_to_use == "v2":
         folder = "image_v2_input"
+
     elif args.image_feature_to_use == "custom":
         folder = "image_custom_input"
+
     # train
     X_img_train = (
         open_npz(
@@ -312,6 +337,7 @@ if "img" in args.input:
         )
         / 3
     )
+
     # validation
     X_img_validation = (
         open_npz(
@@ -324,6 +350,7 @@ if "img" in args.input:
         )
         / 3
     )
+
     # test
     X_img_test = (
         open_npz(
@@ -336,6 +363,7 @@ if "img" in args.input:
         )
         / 3
     )
+
     img_train_input_shape = X_img_train.shape
 
     if args.image_feature_to_use == "v1" or args.image_feature_to_use == "v2":
@@ -394,13 +422,23 @@ multimodal = False if len(args.input) == 1 else len(args.input)
 fusion = False if len(args.input) == 1 else True
 
 modelHand = ModelHandler()
-opt = Adam(lr=args.lr, beta_1=0.9, beta_2=0.999, epsilon=None, decay=0.0, amsgrad=False)
+# TODO: decay is deprecated in TF2
+opt = Adam(
+    learning_rate=args.lr,
+    beta_1=0.9,
+    beta_2=0.999,
+    epsilon=1e-7,
+    decay=0.0,
+    amsgrad=False,
+)
 
 if "coord" in args.input:
     if args.restore_models:
-        coord_model = load_model_structure(args.model_folder + "coord_model.json")
+        coord_model = load_model_structure(
+            str(Path(args.model_folder) / "coord_model.json")
+        )
         coord_model.load_weights(
-            args.model_folder + "best_weights.coord.h5", by_name=True
+            str(Path(args.model_folder) / "best_weights.coord.h5"), by_name=True
         )
     else:
         coord_model = modelHand.createArchitecture(
@@ -1098,7 +1136,7 @@ else:
                     shuffle=args.shuffle,
                     callbacks=[
                         tf.keras.callbacks.ModelCheckpoint(
-                            args.model_folder + "best_weights.coord.h5",
+                            str(Path(args.model_folder) / "best_weights.coord.h5"),
                             monitor="val_loss",
                             verbose=1,
                             save_best_only=True,
@@ -1111,7 +1149,7 @@ else:
                 )
 
                 print(hist.history.keys())
-                print["val_loss", hist.history["val_loss"]]
+                print("val_loss", hist.history["val_loss"])
                 print(
                     "categorical_accuracy",
                     hist.history["categorical_accuracy"],

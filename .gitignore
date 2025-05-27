@@ -14,3 +14,4 @@ Thumbs.db
 *.h5
 baseline_data/
 .qodo
+venv
