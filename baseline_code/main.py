@@ -4,12 +4,13 @@
 ########################################################
 from __future__ import division
 
+from ast import Raise
 import os
 import argparse
 import numpy as np
-from tqdm import tqdm
 import random
 from pathlib import Path
+import pprint
 
 import tensorflow as tf
 
@@ -34,8 +35,20 @@ from tensorflow.keras.layers import BatchNormalization
 from sklearn.preprocessing import normalize
 
 from ModelHandler import add_model, load_model_structure, ModelHandler
-from custom_metrics import *
-from math import log
+from custom_metrics import (
+    top_1_accuracy,
+    top_2_accuracy,
+    top_5_accuracy,
+    top_10_accuracy,
+    top_25_accuracy,
+    top_50_accuracy,
+    precision_m,
+    recall_m,
+    f1_m,
+    R2_metric,
+)
+
+from utils import str2bool, open_npz, getBeamOutput, custom_label
 
 
 # tf.compat.v1.disable_eager_execution()  # TF2
@@ -49,123 +62,6 @@ os.environ["PYTHONHASHSEED"] = str(seed)
 tf.random.set_seed(seed)
 np.random.seed(seed)
 random.seed(seed)
-
-
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
-
-
-def check_and_create(dir_path):
-    if os.path.exists(dir_path):
-        return True
-    else:
-        os.makedirs(dir_path)
-        return False
-
-
-def open_npz(path, key):
-    data = np.load(path)[key]
-    return data
-
-
-def beamsLogScale(y, thresholdBelowMax):
-    y_shape = y.shape  # shape is (#,256)
-
-    for i in range(0, y_shape[0]):
-        thisOutputs = y[i, :]
-        logOut = 20 * np.log10(thisOutputs + 1e-30)
-        minValue = np.amax(logOut) - thresholdBelowMax
-        zeroedValueIndices = logOut < minValue
-        thisOutputs[zeroedValueIndices] = 0
-        thisOutputs = thisOutputs / sum(thisOutputs)
-        y[i, :] = thisOutputs
-    return y
-
-
-def getBeamOutput(output_file):
-    thresholdBelowMax = 6
-    print("Reading dataset...", output_file)
-    output_cache_file = np.load(output_file)
-    yMatrix = output_cache_file["output_classification"]
-
-    yMatrix = np.abs(yMatrix)
-    yMatrix /= np.max(yMatrix)
-    num_classes = yMatrix.shape[1] * yMatrix.shape[2]
-
-    y = yMatrix.reshape(yMatrix.shape[0], num_classes)
-    y = beamsLogScale(y, thresholdBelowMax)
-
-    return y, num_classes
-
-
-def custom_label(output_file, strategy="one_hot"):
-    "This function generates the labels based on input strategies, one hot, reg"
-
-    print("Reading beam outputs...", output_file)
-    output_cache_file = np.load(output_file)
-    yMatrix = output_cache_file["output_classification"]
-
-    yMatrix = np.abs(yMatrix)
-
-    num_classes = yMatrix.shape[1] * yMatrix.shape[2]
-    y = yMatrix.reshape(yMatrix.shape[0], num_classes)
-    y_non_on_hot = np.array(y)
-    y_shape = y.shape
-
-    if strategy == "one_hot":
-        k = 1  # For one hot encoding we need the best one
-        for i in range(0, y_shape[0]):
-            thisOutputs = y[i, :]
-            logOut = 20 * np.log10(thisOutputs)
-            max_index = logOut.argsort()[-k:][::-1]
-            y[i, :] = 0
-            y[i, max_index] = 1
-
-    elif strategy == "reg":
-        for i in range(0, y_shape[0]):
-            thisOutputs = y[i, :]
-            logOut = 20 * np.log10(thisOutputs)
-            y[i, :] = logOut
-    else:
-        print("Invalid strategy")
-    return y_non_on_hot, y, num_classes
-
-
-def over_k(true, pred):  # for TF2
-    ####compute accuracy per K
-    dicti = {}
-    for kth in range(256):
-        kth_accuracy = metrics.top_k_categorical_accuracy(true, pred, k=kth)
-        with tf.compat.v1.Session() as sess:
-            this = kth_accuracy.eval()
-        dicti[kth] = sum(this) / len(this)
-    return dicti
-
-
-def througput_ratio(preds, y):
-    ####compute throughput ratio
-    throughputs = {}
-    for k in tqdm(range(1, 256)):
-        up = []
-        down = []
-        for exp in range(len(y)):
-            true_1 = y[exp].argsort()[-1:][::-1]
-            t1 = log(y[exp, true_1] + 1, 2)
-
-            top_preds = preds[exp].argsort()[-k:][::-1]
-            p1 = max([log(y[exp, t] + 1, 2) for t in top_preds])
-            up.append(p1)
-            down.append(t1)
-
-        throughputs["choices_" + str(k)] = sum(up) / sum(down)
-    return throughputs
 
 
 this_file_path = Path(os.path.dirname(os.path.realpath(__file__)))
@@ -183,7 +79,11 @@ parser.add_argument(
 parser.add_argument(
     "--input",
     nargs="*",
-    default=["coord"],
+    default=[
+        "img",
+        "coord",
+        "lidar",
+    ],
     choices=["img", "coord", "lidar"],
     help="Which data to use as input. Select from: img, lidar or coord.",
 )
@@ -200,7 +100,7 @@ parser.add_argument(
     default=False,
 )
 parser.add_argument(
-    "--epochs", default=50, type=int, help="Specify the epochs to train"
+    "--epochs", default=20, type=int, help="Specify the epochs to train"
 )
 parser.add_argument(
     "--lr",
@@ -229,14 +129,14 @@ parser.add_argument(
 parser.add_argument(
     "--image_feature_to_use",
     type=str,
-    default="v1",
+    default="custom",
     help="feature images to use",
     choices=["v1", "v2", "custom"],
 )
 parser.add_argument(
     "--train_or_test",
     type=str,
-    default="train",
+    default="test",
     help="Train or test",
     choices=["train", "test"],
 )
@@ -287,18 +187,16 @@ Initial_labels_train = y_train  # these are same for all modalities
 Initial_labels_val = y_validation
 
 if "coord" in args.input:
-    coord_folder = Path(args.data_folder) / "coord_input"
+    coord_folder = str(Path(args.data_folder) / "coord_input" / "coord_{}.npz")
 
     # train
-    X_coord_train = open_npz(str(coord_folder / "coord_train.npz"), "coordinates")
+    X_coord_train = open_npz(coord_folder.format("train"), "coordinates")
 
     # validation
-    X_coord_validation = open_npz(
-        str(coord_folder / "coord_validation.npz"), "coordinates"
-    )
+    X_coord_validation = open_npz(coord_folder.format("validation"), "coordinates")
 
     # test
-    X_coord_test = open_npz(str(coord_folder / "coord_test.npz"), "coordinates")
+    X_coord_test = open_npz(coord_folder.format("test"), "coordinates")
     coord_train_input_shape = X_coord_train.shape
 
     ###############Normalize
@@ -329,10 +227,14 @@ if "img" in args.input:
     elif args.image_feature_to_use == "custom":
         folder = "image_custom_input"
 
+    img_folder = str(
+        Path(args.data_folder) / folder / f"img_input_{{}}_{resizeFac}.npz"
+    )
+
     # train
     X_img_train = (
         open_npz(
-            args.data_folder + folder + "/img_input_train_" + str(resizeFac) + ".npz",
+            img_folder.format("train"),
             "inputs",
         )
         / 3
@@ -341,11 +243,7 @@ if "img" in args.input:
     # validation
     X_img_validation = (
         open_npz(
-            args.data_folder
-            + folder
-            + "/img_input_validation_"
-            + str(resizeFac)
-            + ".npz",
+            img_folder.format("validation"),
             "inputs",
         )
         / 3
@@ -354,11 +252,7 @@ if "img" in args.input:
     # test
     X_img_test = (
         open_npz(
-            args.test_data_folder
-            + folder
-            + "/img_input_test_"
-            + str(resizeFac)
-            + ".npz",
+            img_folder.format("test"),
             "inputs",
         )
         / 3
@@ -371,6 +265,7 @@ if "img" in args.input:
         X_img_train = X_img_train.astype("float32") / 255
         X_img_validation = X_img_validation.astype("float32") / 255
         X_img_test = X_img_test.astype("float32") / 255
+
     elif args.image_feature_to_use == "custom":
         print(
             "********************Reshape images for convolutional********************"
@@ -400,18 +295,15 @@ if "img" in args.input:
         )
 
 if "lidar" in args.input:
+    lidar_folder = str(Path(args.data_folder) / "lidar_input" / "lidar_{}.npz")
+
     # train
-    X_lidar_train = (
-        open_npz(args.data_folder + "lidar_input/lidar_train.npz", "input") / 2
-    )
+    X_lidar_train = open_npz(lidar_folder.format("train"), "input") / 2
     # validation
-    X_lidar_validation = (
-        open_npz(args.data_folder + "lidar_input/lidar_validation.npz", "input") / 2
-    )
+    X_lidar_validation = open_npz(lidar_folder.format("validation"), "input") / 2
     # test
-    X_lidar_test = (
-        open_npz(args.test_data_folder + "lidar_input/lidar_test.npz", "input") / 2
-    )
+    X_lidar_test = open_npz(lidar_folder.format("test"), "input") / 2
+
     lidar_train_input_shape = X_lidar_train.shape
 
 ##############################################################################
@@ -449,27 +341,30 @@ if "coord" in args.input:
             args.strategy,
             fusion,
         )
-        if not os.path.exists(args.model_folder + "coord_model.json"):
+        if not os.path.exists(str(Path(args.model_folder) / "coord_model.json")):
             add_model("coord", coord_model, args.model_folder)
 
 if "img" in args.input:
     if args.image_feature_to_use == "v1" or args.image_feature_to_use == "v2":
         model_type = "light_image_v1_v2"
+
     elif args.image_feature_to_use == "custom":
         model_type = "light_image_custom"
 
     if args.restore_models:
         img_model = load_model_structure(
-            args.model_folder
-            + "image_"
-            + args.image_feature_to_use
-            + "_model"
-            + ".json"
+            str(
+                Path(args.model_folder)
+                / f"image_{args.image_feature_to_use}_model.json"
+            )
         )
+
         img_model.load_weights(
-            args.model_folder + "best_weights.img_" + args.image_feature_to_use + ".h5",
+            Path(args.model_folder)
+            / f"best_weights.img_{args.image_feature_to_use}.h5",
             by_name=True,
         )
+
     else:
         img_model = modelHand.createArchitecture(
             model_type,
@@ -480,22 +375,25 @@ if "img" in args.input:
             fusion,
         )
         if not os.path.exists(
-            args.model_folder
-            + "image_"
-            + args.image_feature_to_use
-            + "_model"
-            + ".json"
+            str(
+                Path(args.model_folder)
+                / f"image_{args.image_feature_to_use}_model.json"
+            )
         ):
             add_model(
-                "image_" + args.image_feature_to_use, img_model, args.model_folder
+                f"image_{args.image_feature_to_use}", img_model, args.model_folder
             )
 
 if "lidar" in args.input:
     if args.restore_models:
-        lidar_model = load_model_structure(args.model_folder + "lidar_model.json")
-        lidar_model.load_weights(
-            args.model_folder + "best_weights.lidar.h5", by_name=True
+        lidar_model = load_model_structure(
+            str(Path(args.model_folder) / "lidar_model.json")
         )
+
+        lidar_model.load_weights(
+            str(Path(args.model_folder) / "best_weights.lidar.h5"), by_name=True
+        )
+
     else:
         lidar_model = modelHand.createArchitecture(
             "lidar_marcus",
@@ -509,7 +407,7 @@ if "lidar" in args.input:
             args.strategy,
             fusion,
         )
-        if not os.path.exists(args.model_folder + "lidar_model.json"):
+        if not os.path.exists(str(Path(args.model_folder) / "lidar_model.json")):
             add_model("lidar", lidar_model, args.model_folder)
 
 ###############################################################################
@@ -606,7 +504,7 @@ if multimodal == 2:
                 batch_size=args.bs,
                 callbacks=[
                     tf.keras.callbacks.ModelCheckpoint(
-                        args.model_folder + "best_weights.coord_lidar.h5",
+                        str(Path(args.model_folder) / "best_weights.coord_lidar.h5"),
                         monitor="val_loss",
                         verbose=1,
                         save_best_only=True,
@@ -648,7 +546,8 @@ if multimodal == 2:
         elif args.train_or_test == "test":
             print("***************Testing************")
             model.load_weights(
-                args.model_folder + "best_weights.coord_lidar.h5", by_name=True
+                str(Path(args.model_folder) / "best_weights.coord_lidar.h5"),
+                by_name=True,
             )
             scores = model.evaluate(x_test, y_test)
             print("Test results:", model.metrics_names, scores)
@@ -744,10 +643,10 @@ if multimodal == 2:
                 batch_size=args.bs,
                 callbacks=[
                     tf.keras.callbacks.ModelCheckpoint(
-                        args.model_folder
-                        + "best_weights.coord_img_"
-                        + args.image_feature_to_use
-                        + ".h5",
+                        str(
+                            Path(args.model_folder)
+                            / f"best_weights.coord_img_{args.image_feature_to_use}.h5"
+                        ),
                         monitor="val_loss",
                         verbose=1,
                         save_best_only=True,
@@ -788,16 +687,16 @@ if multimodal == 2:
         elif args.train_or_test == "test":
             print("***************Testing************")
             model.load_weights(
-                args.model_folder
-                + "best_weights.coord_img_"
-                + args.image_feature_to_use
-                + ".h5",
+                str(
+                    Path(args.model_folder)
+                    / f"best_weights.coord_img_{args.image_feature_to_use}.h5"
+                ),
                 by_name=True,
             )
             scores = model.evaluate(x_test, y_test)
             print("Test results:", model.metrics_names, scores)
 
-    else:  # img+lidar
+    elif "img" in args.input and "lidar" in args.input:
         x_train = [X_lidar_train, X_img_train]
         x_validation = [X_lidar_validation, X_img_validation]
         x_test = [X_lidar_test, X_img_test]
@@ -874,10 +773,10 @@ if multimodal == 2:
                 batch_size=args.bs,
                 callbacks=[
                     tf.keras.callbacks.ModelCheckpoint(
-                        args.model_folder
-                        + "best_weights.img_lidar"
-                        + args.image_feature_to_use
-                        + ".h5",
+                        str(
+                            Path(args.model_folder)
+                            / f"best_weights.img_lidar_{args.image_feature_to_use}.h5"
+                        ),
                         monitor="val_loss",
                         verbose=1,
                         save_best_only=True,
@@ -920,14 +819,17 @@ if multimodal == 2:
         elif args.train_or_test == "test":
             print("***************Testing the model************")
             model.load_weights(
-                args.model_folder
-                + "best_weights.img_lidar"
-                + args.image_feature_to_use
-                + ".h5",
+                Path(args.model_folder)
+                / f"best_weights.img_lidar_{args.image_feature_to_use}.h5",
                 by_name=True,
             )
             scores = model.evaluate(x_test, y_test)
             print("Test results", model.metrics_names, scores)
+
+    else:
+        raise ValueError(
+            "Invalid multimodal input. Please select two modalities from: coord, img, lidar."
+        )
 
 
 elif multimodal == 3:
@@ -1011,10 +913,10 @@ elif multimodal == 3:
             batch_size=args.bs,
             callbacks=[
                 tf.keras.callbacks.ModelCheckpoint(
-                    args.model_folder
-                    + "best_weights.coord_img_lidar_"
-                    + args.image_feature_to_use
-                    + ".h5",
+                    str(
+                        Path(args.model_folder)
+                        / f"best_weights.coord_img_lidar_{args.image_feature_to_use}.h5"
+                    ),
                     monitor="val_loss",
                     verbose=1,
                     save_best_only=True,
@@ -1060,10 +962,10 @@ elif multimodal == 3:
     elif args.train_or_test == "test":
         print("***************Testing the model************")
         model.load_weights(
-            args.model_folder
-            + "best_weights.coord_img_lidar_"
-            + args.image_feature_to_use
-            + ".h5",
+            str(
+                Path(args.model_folder)
+                / f"best_weights.coord_img_lidar_{args.image_feature_to_use}.h5"
+            ),
             by_name=True,
         )
         scores = model.evaluate(x_test, y_test)
@@ -1075,8 +977,9 @@ elif multimodal == 3:
 else:
 
     if "coord" in args.input:
+        model = coord_model
+
         if args.strategy == "reg":
-            model = coord_model
             model.compile(
                 loss="mse",
                 optimizer=opt,
@@ -1089,6 +992,7 @@ else:
                 ],
             )
             model.summary()
+
             if args.train_or_test == "train":
                 print("***************Training************")
                 hist = model.fit(
@@ -1100,13 +1004,13 @@ else:
                     shuffle=args.shuffle,
                 )
                 print("losses in train:", hist.history["loss"])
+
             elif args.train_or_test == "test":
                 print("*****************Testing***********************")
                 scores = model.evaluate(X_coord_test, y_test)
                 pprint("scores while testing:", model.metrics_names, scores)
 
         if args.strategy == "one_hot":
-            model = coord_model
             model.compile(
                 loss=categorical_crossentropy,
                 optimizer=opt,
@@ -1179,7 +1083,7 @@ else:
             elif args.train_or_test == "test":
                 print("***************Testing************")
                 model.load_weights(
-                    args.model_folder + "best_weights.coord.h5", by_name=True
+                    str(Path(args.model_folder) / "best_weights.coord.h5"), by_name=True
                 )  ## Restoring best weight for testing
                 scores = model.evaluate(X_coord_test, y_test)
                 print("Test results", model.metrics_names, scores)
@@ -1245,10 +1149,10 @@ else:
                     shuffle=args.shuffle,
                     callbacks=[
                         tf.keras.callbacks.ModelCheckpoint(
-                            args.model_folder
-                            + "best_weights.img_"
-                            + args.image_feature_to_use
-                            + ".h5",
+                            str(
+                                Path(args.model_folder)
+                                / f"best_weights.img_{args.image_feature_to_use}.h5"
+                            ),
                             monitor="val_loss",
                             verbose=1,
                             save_best_only=True,
@@ -1290,10 +1194,10 @@ else:
             elif args.train_or_test == "test":
                 print("*****************Testing***********************")
                 model.load_weights(
-                    args.model_folder
-                    + "best_weights.img_"
-                    + args.image_feature_to_use
-                    + ".h5",
+                    str(
+                        Path(args.model_folder)
+                        / f"best_weights.img_{args.image_feature_to_use}.h5"
+                    ),
                     by_name=True,
                 )
                 scores = model.evaluate(X_img_test, y_test)
@@ -1368,7 +1272,7 @@ else:
                     shuffle=args.shuffle,
                     callbacks=[
                         tf.keras.callbacks.ModelCheckpoint(
-                            args.model_folder + "best_weights.lidar.h5",
+                            str(Path(args.model_folder) / "best_weights.lidar.h5"),
                             monitor="val_loss",
                             verbose=2,
                             save_best_only=True,
@@ -1414,7 +1318,7 @@ else:
             elif args.train_or_test == "test":
                 print("***************Testing************")
                 model.load_weights(
-                    args.model_folder + "best_weights.lidar.h5", by_name=True
+                    str(Path(args.model_folder) / "best_weights.lidar.h5"), by_name=True
                 )  # to be added
                 scores = model.evaluate(X_lidar_test, y_test)
                 print("Test results", model.metrics_names, scores)
