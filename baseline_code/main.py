@@ -4,7 +4,6 @@
 ########################################################
 from __future__ import division
 
-from ast import Raise
 import os
 import argparse
 import numpy as np
